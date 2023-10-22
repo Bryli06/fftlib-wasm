@@ -1,4 +1,5 @@
-use std::{f64::consts::PI, arch::x86_64::*};
+use std::f64::consts::PI;
+use core::arch::wasm32::*;
 
 use crate::complex::Complex;
 
@@ -198,20 +199,20 @@ impl FFT {
     fn kf_butterfly2_simd(&self, v: &mut [Complex], fstride: usize, m: usize) {
         for i in 0..m {
             unsafe {
-                let mut x = _mm_load_pd((&self.twiddlers[i * fstride]) as *const Complex as *const f64);
-                let mut yr: __m128d = _mm_set_pd1(v[i + m].real);
-                let mut yi: __m128d = _mm_set_pd1(v[i + m].imaginary);
+                let mut x = v128_load((&self.twiddlers[i * fstride]) as *const Complex as *const v128);
+                let mut yr: v128 = f64x2_splat(v[i + m].real);
+                let mut yi: v128 = f64x2_splat(v[i + m].imaginary);
 
-                yr = _mm_mul_pd(x, yr);
-                let mut n1: __m128d = _mm_shuffle_pd::<1>(x, x);
-                yi = _mm_mul_pd(n1, yi);
-                n1 = _mm_sub_pd(yr, yi);
-                yr = _mm_add_pd(yr, yi);
-                n1 = _mm_shuffle_pd::<2>(n1, yr);
+                yr = f64x2_mul(x, yr);
+                let mut n1: v128 = i64x2_shuffle::<1,2>(x, x);
+                yi = f64x2_mul(n1, yi);
+                n1 = f64x2_sub(yr, yi);
+                yr = f64x2_add(yr, yi);
+                n1 = i64x2_shuffle::<0,3>(n1, yr);
 
-                x = _mm_load_pd(&v[i] as *const Complex as *const f64);
-                _mm_store_pd(&mut v[i + m] as *mut Complex as *mut f64, _mm_sub_pd(x, n1));
-                _mm_store_pd(&mut v[i    ] as *mut Complex as *mut f64, _mm_add_pd(x, n1));
+                x = v128_load(&v[i] as *const Complex as *const v128);
+                v128_store(&mut v[i + m] as *mut Complex as *mut v128, f64x2_sub(x, n1));
+                v128_store(&mut v[i    ] as *mut Complex as *mut v128, f64x2_add(x, n1));
             }
         }
     }
@@ -219,107 +220,97 @@ impl FFT {
     fn kf_butterfly3_simd(&self, v: &mut [Complex], fstride: usize, m: usize) {
         unsafe {
             let m2 = 2 * m;
-            let mut temp: [__m128d; 6] = [_mm_setzero_pd(); 6];
-            let epi3: __m128d = _mm_set_pd1(self.twiddlers[m * fstride].imaginary);
+            let mut temp: [v128; 6] = [f64x2_splat(0.0); 6];
+            let epi3: v128 = f64x2_splat(self.twiddlers[m * fstride].imaginary);
 
             for i in 0..m {
-                let mut x = _mm_load_pd(&(v[i + m]) as *const Complex as *const f64);
-                let mut yr: __m128d = _mm_set_pd1(self.twiddlers[i * fstride].real);
-                let mut yi: __m128d = _mm_set_pd1(self.twiddlers[i * fstride].imaginary);
-
-                yr = _mm_mul_pd(x, yr);
-                temp[1] = _mm_shuffle_pd::<1>(x, x);
-                yi = _mm_mul_pd(temp[1], yi);
-                temp[1] = _mm_sub_pd(yr, yi);
-                yr = _mm_add_pd(yr, yi);
-                temp[1] = _mm_shuffle_pd::<2>(temp[1], yr);
-
+                temp[1] = mult(v[i+m ], self.twiddlers[    fstride * i]);
                 temp[2] = mult(v[i+m2], self.twiddlers[2 * fstride * i]);
-                temp[4] = _mm_load_pd(&v[i] as *const Complex as *const f64);
+                temp[4] = v128_load(&v[i] as *const Complex as *const v128);
 
-                temp[3] = _mm_add_pd(temp[1], temp[2]);
-                temp[0] = _mm_sub_pd(temp[1], temp[2]);
+                temp[3] = f64x2_add(temp[1], temp[2]);
+                temp[0] = f64x2_sub(temp[1], temp[2]);
 
-                x = _mm_sub_pd(temp[4], _mm_mul_pd(_mm_set_pd1(0.5), temp[3]));
+                let x = f64x2_sub(temp[4], f64x2_mul(f64x2_splat(0.5), temp[3]));
 
-                temp[0] = _mm_mul_pd(temp[0], epi3);
-                temp[0] = _mm_shuffle_pd::<1>(temp[0], temp[0]);
-                temp[0] = _mm_xor_pd(temp[0], _mm_set_pd(-0.0, 0.0));
+                temp[0] = f64x2_mul(temp[0], epi3);
+                temp[0] = i64x2_shuffle::<1,2>(temp[0], temp[0]);
+                temp[0] = v128_xor(temp[0], f64x2(0.0, -0.0));
 
-                _mm_store_pd(&mut v[i] as *mut Complex as *mut f64, _mm_add_pd(temp[4], temp[3]));
+                v128_store(&mut v[i] as *mut Complex as *mut v128, f64x2_add(temp[4], temp[3]));
 
-                _mm_store_pd(&mut v[i+m2] as *mut Complex as *mut f64, _mm_add_pd(x, temp[0]));
-                _mm_store_pd(&mut v[i+m] as *mut Complex as *mut f64, _mm_sub_pd(x, temp[0]));
+                v128_store(&mut v[i+m2] as *mut Complex as *mut v128, f64x2_add(x, temp[0]));
+                v128_store(&mut v[i+m] as *mut Complex as *mut v128, f64x2_sub(x, temp[0]));
             }
         }
     }
 
     fn kf_butterfly4_simd(&self, v: &mut [Complex], fstride: usize, m: usize) {
         unsafe {
-            let mut temp: [__m128d; 7] = [_mm_setzero_pd(); 7];
-            let scale = if self.inverse { _mm_set_pd(-0.0, 0.0) } else { _mm_set_pd(0.0, -0.0) };
+            let mut temp: [v128; 7] = [f64x2(0.0, 0.0); 7];
+            let scale = if self.inverse { f64x2(0.0, -0.0) } else { f64x2(-0.0, 0.0) };
             for i in 0..m {
                 temp[0] = mult(v[i + m], self.twiddlers[i * fstride]);
                 temp[1] = mult(v[i + 2*m], self.twiddlers[i * fstride * 2]);
                 temp[2] = mult(v[i + 3*m], self.twiddlers[i * fstride * 3]);
-                temp[6] = _mm_load_pd(&v[i] as *const Complex as *const f64);
-                temp[5] = _mm_sub_pd(temp[6], temp[1]);
+                temp[6] = v128_load(&v[i] as *const Complex as *const v128);
+                temp[5] = f64x2_sub(temp[6], temp[1]);
 
-                temp[6] = _mm_add_pd(temp[6], temp[1]);
-                temp[3] = _mm_add_pd(temp[0], temp[2]);
+                temp[6] = f64x2_add(temp[6], temp[1]);
+                temp[3] = f64x2_add(temp[0], temp[2]);
 
-                temp[4] = _mm_sub_pd(temp[0], temp[2]);
-                temp[4] = _mm_shuffle_pd::<1>(temp[4], temp[4]);
-                temp[4] = _mm_xor_pd(temp[4], scale);
+                temp[4] = f64x2_sub(temp[0], temp[2]);
+                temp[4] = i64x2_shuffle::<1,2>(temp[4], temp[4]);
+                temp[4] = v128_xor(temp[4], scale);
 
-                _mm_store_pd(&mut v[i + 2*m] as *mut Complex as *mut f64, _mm_sub_pd(temp[6], temp[3]));
-                _mm_store_pd(&mut v[i      ] as *mut Complex as *mut f64, _mm_add_pd(temp[6], temp[3]));
-                _mm_store_pd(&mut v[i +   m] as *mut Complex as *mut f64, _mm_add_pd(temp[5], temp[4]));
-                _mm_store_pd(&mut v[i + 3*m] as *mut Complex as *mut f64, _mm_sub_pd(temp[5], temp[4]));
+                v128_store(&mut v[i + 2*m] as *mut Complex as *mut v128, f64x2_sub(temp[6], temp[3]));
+                v128_store(&mut v[i      ] as *mut Complex as *mut v128, f64x2_add(temp[6], temp[3]));
+                v128_store(&mut v[i +   m] as *mut Complex as *mut v128, f64x2_add(temp[5], temp[4]));
+                v128_store(&mut v[i + 3*m] as *mut Complex as *mut v128, f64x2_sub(temp[5], temp[4]));
             }
         }
     }
 
     fn kf_butterfly5_simd(&self, v: &mut [Complex], fstride: usize, m: usize) {
         unsafe {
-            let yar = _mm_set_pd1(self.twiddlers[fstride * m].real);
-            let yai = _mm_set_pd(self.twiddlers[fstride * m].imaginary, -self.twiddlers[fstride * m].imaginary);
-            let ybr = _mm_set_pd1(self.twiddlers[fstride * 2 * m].real);
-            let ybi = _mm_set_pd(self.twiddlers[fstride * 2 * m].imaginary, -self.twiddlers[fstride * 2 * m].imaginary);
-            let mut temp: [__m128d; 13] = [_mm_setzero_pd(); 13];
+            let yar = f64x2_splat(self.twiddlers[fstride * m].real);
+            let yai = f64x2(-self.twiddlers[fstride * m].imaginary, self.twiddlers[fstride * m].imaginary);
+            let ybr = f64x2_splat(self.twiddlers[fstride * 2 * m].real);
+            let ybi = f64x2(self.twiddlers[fstride * 2 * m].imaginary, -self.twiddlers[fstride * 2 * m].imaginary);
+            let mut temp: [v128; 13] = [f64x2(0.0, 0.0); 13];
 
             for i in 0..m {
-                temp[0] = _mm_load_pd(&v[i] as *const Complex as *const f64);
+                temp[0] = v128_load(&v[i] as *const Complex as *const v128);
 
                 temp[1] = mult(v[i +   m], self.twiddlers[  i*fstride]);
                 temp[2] = mult(v[i + 2*m], self.twiddlers[2*i*fstride]);
                 temp[3] = mult(v[i + 3*m], self.twiddlers[3*i*fstride]);
                 temp[4] = mult(v[i + 4*m], self.twiddlers[4*i*fstride]);
 
-                temp[7 ] = _mm_add_pd(temp[1], temp[4]);
-                temp[10] = _mm_sub_pd(temp[1], temp[4]);
-                temp[8 ] = _mm_add_pd(temp[2], temp[3]);
-                temp[9 ] = _mm_sub_pd(temp[2], temp[3]);
+                temp[7 ] = f64x2_add(temp[1], temp[4]);
+                temp[10] = f64x2_sub(temp[1], temp[4]);
+                temp[8 ] = f64x2_add(temp[2], temp[3]);
+                temp[9 ] = f64x2_sub(temp[2], temp[3]);
 
-                _mm_store_pd(&mut v[i] as *mut Complex as *mut f64, _mm_add_pd(temp[0], _mm_add_pd(temp[7], temp[8])));
+                v128_store(&mut v[i] as *mut Complex as *mut v128, f64x2_add(temp[0], f64x2_add(temp[7], temp[8])));
 
-                temp[5] = _mm_add_pd(temp[0], _mm_add_pd(
-                        _mm_mul_pd(temp[7], yar), _mm_mul_pd(temp[8], ybr)));
+                temp[5] = f64x2_add(temp[0], f64x2_add(
+                        f64x2_mul(temp[7], yar), f64x2_mul(temp[8], ybr)));
 
-                temp[6] = _mm_add_pd(_mm_mul_pd(temp[10], yai), _mm_mul_pd(temp[9], ybi));
-                temp[6] = _mm_shuffle_pd::<1>(temp[6], temp[6]);
+                temp[6] = f64x2_sub(f64x2_mul(temp[10], yai), f64x2_mul(temp[9], ybi));
+                temp[6] = i64x2_shuffle::<1,2>(temp[6], temp[6]);
 
-                _mm_store_pd(&mut v[i +   m] as *mut Complex as *mut f64, _mm_sub_pd(temp[5], temp[6]));
-                _mm_store_pd(&mut v[i + 4*m] as *mut Complex as *mut f64, _mm_add_pd(temp[5], temp[6]));
+                v128_store(&mut v[i +   m] as *mut Complex as *mut v128, f64x2_sub(temp[5], temp[6]));
+                v128_store(&mut v[i + 4*m] as *mut Complex as *mut v128, f64x2_add(temp[5], temp[6]));
 
-                temp[11] = _mm_add_pd(temp[0], _mm_add_pd(
-                        _mm_mul_pd(temp[7], ybr), _mm_mul_pd(temp[8], yar)));
+                temp[11] = f64x2_add(temp[0], f64x2_add(
+                        f64x2_mul(temp[7], ybr), f64x2_mul(temp[8], yar)));
 
-                temp[12] = _mm_sub_pd(_mm_mul_pd(temp[9], yai), _mm_mul_pd(temp[10], ybi));
-                temp[12] = _mm_shuffle_pd::<1>(temp[12], temp[12]);
+                temp[12] = f64x2_add(f64x2_mul(temp[9], yai), f64x2_mul(temp[10], ybi));
+                temp[12] = i64x2_shuffle::<1,2>(temp[12], temp[12]);
 
-                _mm_store_pd(&mut v[i + 2*m] as *mut Complex as *mut f64, _mm_add_pd(temp[11], temp[12]));
-                _mm_store_pd(&mut v[i + 3*m] as *mut Complex as *mut f64, _mm_sub_pd(temp[11], temp[12]));
+                v128_store(&mut v[i + 2*m] as *mut Complex as *mut v128, f64x2_add(temp[11], temp[12]));
+                v128_store(&mut v[i + 3*m] as *mut Complex as *mut v128, f64x2_sub(temp[11], temp[12]));
             }
         }
     }
@@ -399,17 +390,17 @@ fn find_ugly(k: usize) -> usize {
     items[low]
 }
 
-fn mult(a: Complex, b: Complex) -> __m128d {
+fn mult(a: Complex, b: Complex) -> v128 {
     unsafe {
-        let x = _mm_load_pd((&a) as *const Complex as *const f64);
-        let mut yr: __m128d = _mm_set_pd1(b.real);
-        let mut yi: __m128d = _mm_set_pd1(b.imaginary);
+        let x = v128_load((&a) as *const Complex as *const v128);
+        let mut yr: v128 = f64x2_splat(b.real);
+        let mut yi: v128 = f64x2_splat(b.imaginary);
 
-        yr = _mm_mul_pd(x, yr);
-        let mut n1: __m128d = _mm_shuffle_pd::<1>(x, x);
-        yi = _mm_mul_pd(n1, yi);
-        n1 = _mm_sub_pd(yr, yi);
-        yr = _mm_add_pd(yr, yi);
-        _mm_shuffle_pd::<2>(n1, yr)
+        yr = f64x2_mul(x, yr);
+        let mut n1: v128 = i64x2_shuffle::<1,2>(x, x);
+        yi = f64x2_mul(n1, yi);
+        n1 = f64x2_sub(yr, yi);
+        yr = f64x2_add(yr, yi);
+        i64x2_shuffle::<0,3>(n1, yr)
     }
 }
